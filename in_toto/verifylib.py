@@ -697,19 +697,28 @@ def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
     # Extract destination artifacts from destination link
     dest_artifacts = getattr(dest_link, rule_data["dest_type"])
 
+    # Canonicalize rule prefixes (no-op if rule data was created with
+    # rulelib.unpack_rule) to enforce a single path identity and directory
+    # boundaries below.
+    source_prefix = in_toto.rulelib.normalize_artifact_path(
+        rule_data["source_prefix"]
+    )
+    dest_prefix = in_toto.rulelib.normalize_artifact_path(
+        rule_data["dest_prefix"]
+    )
+
     # Filter part 1 - Filter artifacts using optional source prefix, and subtract
     # prefix before filtering with rule pattern (see filter part 2) to prevent
     # globbing in the prefix.
-    if rule_data["source_prefix"]:
-        # Add trailing slash to source prefix if it does not exist
-        normalized_source_prefix = os.path.join(
-            rule_data["source_prefix"], ""
-        ).replace("\\", "/")
+    if source_prefix:
+        # Add trailing slash to match on directory boundaries only, i.e. a
+        # prefix 'sub' matches 'sub/foo' but not 'subfoo'.
+        source_prefix_dir = source_prefix + "/"
 
         filtered_source_paths = [
-            artifact_path[len(normalized_source_prefix) :]
+            artifact_path[len(source_prefix_dir) :]
             for artifact_path in artifacts_queue
-            if artifact_path.startswith(normalized_source_prefix)
+            if artifact_path.startswith(source_prefix_dir)
         ]
 
     else:
@@ -726,10 +735,8 @@ def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
         # If a source prefix was specified, we subtracted the prefix above before
         # globbing. We have to re-prepend the prefix in order to retrieve the
         # corresponding source artifact below.
-        if rule_data["source_prefix"]:
-            full_source_path = os.path.join(
-                rule_data["source_prefix"], path
-            ).replace("\\", "/")
+        if source_prefix:
+            full_source_path = source_prefix + "/" + path
 
         else:
             full_source_path = path
@@ -737,10 +744,8 @@ def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
         # If a destination prefix was specified, the destination artifact should
         # be queried with the full destination path, i.e. the prefix joined with
         # the globbed path.
-        if rule_data["dest_prefix"]:
-            full_dest_path = os.path.join(
-                rule_data["dest_prefix"], path
-            ).replace("\\", "/")
+        if dest_prefix:
+            full_dest_path = dest_prefix + "/" + path
 
         else:
             full_dest_path = path
@@ -989,6 +994,9 @@ def _get_artifact_rule_traceback():
     error message for RuleVerificationError.
 
     """
+    if not RULE_TRACE:
+        return "No artifact rule trace available."
+
     traceback_str = "Full trace for 'expected_{}' of item '{}':\n".format(
         RULE_TRACE["source_type"], RULE_TRACE["source_name"]
     )
@@ -1073,10 +1081,20 @@ def verify_item_rules(source_name, source_type, rules, links):
             f"one of 'materials' or 'products'. Got: '{source_type}'"
         )
 
+    # Canonicalize artifact paths reported by the link, so that each record
+    # enters the queue with a single identity, regardless of separator style,
+    # dot segments or duplicate separators. Out-of-bounds or ambiguous paths
+    # (absolute, escaping the artifact root) are rejected.
+    def _normalize_artifacts(artifacts):
+        return {
+            in_toto.rulelib.normalize_artifact_path(path): hashes
+            for path, hashes in artifacts.items()
+        }
+
     # Create shortcuts to item's materials and products (including hashes),
     # required to verify "modify" and "match" rules.
-    materials_dict = links[source_name].materials
-    products_dict = links[source_name].products
+    materials_dict = _normalize_artifacts(links[source_name].materials)
+    products_dict = _normalize_artifacts(links[source_name].products)
 
     # All other rules only require materials or products paths (without hashes)
     materials_paths = set(materials_dict.keys())
@@ -1085,7 +1103,10 @@ def verify_item_rules(source_name, source_type, rules, links):
     # Depending on the source type we create the artifact queue from the item's
     # materials or products and use it to keep track of (not) consumed artifacts.
     # The queue also only contains artifact keys (without hashes)
-    artifacts = getattr(links[source_name], source_type)
+    if source_type == "materials":
+        artifacts = materials_dict
+    else:
+        artifacts = products_dict
     artifacts_queue = set(artifacts.keys())
 
     # Reset and re-populate rule traceback info dict for a rich error message

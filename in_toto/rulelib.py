@@ -21,6 +21,9 @@
 
 """
 
+import posixpath
+import re
+
 import securesystemslib.exceptions
 import securesystemslib.formats
 
@@ -38,6 +41,71 @@ COMPLEX_RULES = {
     "match",
 }
 ALL_RULES = GENERIC_RULES | COMPLEX_RULES
+
+_DRIVE_PREFIX_RE = re.compile(r"^[a-zA-Z]:")
+
+
+def normalize_artifact_path(path):
+    """
+    <Purpose>
+      Return the canonical form of an artifact path, path pattern or path
+      prefix, as used in artifact rules and artifact queues.
+
+      Canonicalization gives one and the same record a single identity across
+      all rule types (e.g. DISALLOW, REQUIRE, MATCH), independent of how the
+      path was written:
+      - backslashes are treated as separators and replaced with forward
+        slashes (artifact paths are platform independent),
+      - duplicate separators and dot segments are collapsed,
+      - trailing separators are stripped.
+
+      Absolute paths (POSIX or Windows drive-letter style) and paths that
+      escape the artifact root via ".." segments are rejected as out of
+      bounds or ambiguous.
+
+    <Arguments>
+      path:
+              A path, path pattern or path prefix string.
+
+    <Exceptions>
+      securesystemslib.exceptions.FormatError
+              if the path is not a string, is absolute, or escapes the
+              artifact root.
+
+    <Side Effects>
+      None.
+
+    <Returns>
+      The canonical relative POSIX-form path. The empty string denotes the
+      artifact root (e.g. for "" or "./" inputs).
+
+    """
+    _check_str(path)
+
+    # Unify separators: artifact paths always use POSIX semantics, no matter
+    # on which platform the rule or link metadata was created.
+    unified = path.replace("\\", "/")
+
+    # Collapse duplicate separators and dot segments. Note that normpath does
+    # not touch glob characters such as '*', '?' or '[...]'.
+    normalized = posixpath.normpath(unified)
+
+    # "" and "." (e.g. from "" or "./") both refer to the artifact root
+    if normalized in {"", "."}:
+        return ""
+
+    if (
+        normalized.startswith("/")
+        or _DRIVE_PREFIX_RE.match(normalized)
+        or normalized == ".."
+        or normalized.startswith("../")
+    ):
+        raise securesystemslib.exceptions.FormatError(
+            "Invalid artifact path '{}': absolute paths and paths that escape"
+            " the artifact root via '..' are not allowed.".format(path)
+        )
+
+    return normalized
 
 
 def unpack_rule(rule):
@@ -103,7 +171,7 @@ def unpack_rule(rule):
         )
 
     rule_type = rule_lower[0]
-    pattern = rule[1]
+    pattern = normalize_artifact_path(rule[1])
 
     # Type is one of "CREATE", "MODIFY", "DELETE", "ALLOW", "DISALLOW"
     if rule_type in GENERIC_RULES:
@@ -195,8 +263,8 @@ def unpack_rule(rule):
         return {
             "rule_type": rule_type,
             "pattern": pattern,
-            "source_prefix": source_prefix,
-            "dest_prefix": dest_prefix,
+            "source_prefix": normalize_artifact_path(source_prefix),
+            "dest_prefix": normalize_artifact_path(dest_prefix),
             "dest_type": dest_type,
             "dest_name": dest_name,
         }
@@ -265,6 +333,8 @@ def pack_rule(  # noqa: PLR0913, PLR0917, RUF100
     _check_str(rule_type)
     _check_str(pattern)
 
+    pattern = normalize_artifact_path(pattern)
+
     if rule_type.lower() not in ALL_RULES:
         raise securesystemslib.exceptions.FormatError(
             "'{}' is not a valid "
@@ -296,13 +366,13 @@ def pack_rule(  # noqa: PLR0913, PLR0917, RUF100
         if source_prefix:
             _check_str(source_prefix)
 
-            rule += ["IN", source_prefix]
+            rule += ["IN", normalize_artifact_path(source_prefix)]
 
         rule += ["WITH", dest_type.upper()]
 
         if dest_prefix:
             _check_str(dest_prefix)
-            rule += ["IN", dest_prefix]
+            rule += ["IN", normalize_artifact_path(dest_prefix)]
 
         rule += ["FROM", dest_name]
 
